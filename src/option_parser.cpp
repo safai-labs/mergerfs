@@ -14,29 +14,31 @@
   OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 */
 
-#include <fuse.h>
-
-#include <stddef.h>
-#include <string.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-
-#include <string>
-#include <vector>
-#include <sstream>
-#include <iostream>
-#include <iomanip>
-
 #include "config.hpp"
+#include "errno.hpp"
+#include "fs_glob.hpp"
+#include "fs_statvfs_cache.hpp"
 #include "num.hpp"
 #include "policy.hpp"
 #include "str.hpp"
 #include "version.hpp"
 
+#include <fuse.h>
+
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
 using std::string;
 using std::vector;
-using namespace mergerfs;
 
 enum
   {
@@ -44,21 +46,20 @@ enum
     MERGERFS_OPT_VERSION
   };
 
+
 static
 void
-set_option(fuse_args         &args,
+set_option(fuse_args         *args,
            const std::string &option_)
 {
-  string option;
 
-  option = "-o" + option_;
-
-  fuse_opt_insert_arg(&args,1,option.c_str());
+  fuse_opt_add_arg(args,"-o");
+  fuse_opt_add_arg(args,option_.c_str());
 }
 
 static
 void
-set_kv_option(fuse_args         &args,
+set_kv_option(fuse_args         *args,
               const std::string &key,
               const std::string &value)
 {
@@ -71,47 +72,66 @@ set_kv_option(fuse_args         &args,
 
 static
 void
-set_fsname(fuse_args            &args,
-           const vector<string> &srcmounts)
+set_fsname(fuse_args *args_,
+           Config    *config_)
 {
-  if(srcmounts.size() > 0)
+  if(config_->fsname.empty())
     {
-      std::string fsname;
+      vector<string> branches;
 
-      fsname = str::remove_common_prefix_and_join(srcmounts,':');
+      config_->branches.to_paths(branches);
 
-      set_kv_option(args,"fsname",fsname);
+      if(branches.size() > 0)
+        config_->fsname = str::remove_common_prefix_and_join(branches,':');
     }
+
+  set_kv_option(args_,"fsname",config_->fsname);
 }
 
 static
 void
-set_subtype(fuse_args &args)
+set_subtype(fuse_args *args)
 {
   set_kv_option(args,"subtype","mergerfs");
 }
 
 static
 void
-set_default_options(fuse_args &args)
+set_default_options(fuse_args *args)
 {
-  set_option(args,"atomic_o_trunc");
-  set_option(args,"auto_cache");
-  set_option(args,"big_writes");
   set_option(args,"default_permissions");
-  set_option(args,"splice_move");
-  set_option(args,"splice_read");
-  set_option(args,"splice_write");
 }
 
 static
 int
-parse_and_process(const std::string &value,
-                  uint64_t          &minfreespace)
+parse_and_process(const std::string &value_,
+                  uint16_t          &uint16_,
+                  uint16_t           min_,
+                  uint16_t           max_)
+{
+  int rv;
+  uint64_t uint64;
+
+  rv = num::to_uint64_t(value_,uint64);
+  if(rv == -1)
+    return 1;
+
+  if((uint64 > max_) || (uint64 < min_))
+    return 1;
+
+  uint16_ = uint64;
+
+  return 0;
+}
+
+static
+int
+parse_and_process(const std::string &value_,
+                  uint64_t          &int_)
 {
   int rv;
 
-  rv = num::to_uint64_t(value,minfreespace);
+  rv = num::to_uint64_t(value_,int_);
   if(rv == -1)
     return 1;
 
@@ -134,13 +154,13 @@ parse_and_process(const std::string &value,
 
 static
 int
-parse_and_process(const std::string &value,
-                  bool              &boolean)
+parse_and_process(const std::string &value_,
+                  bool              &boolean_)
 {
-  if(value == "false")
-    boolean = false;
-  else if(value == "true")
-    boolean = true;
+  if((value_ == "false") || (value_ == "0") || (value_ == "off"))
+    boolean_ = false;
+  else if((value_ == "true") || (value_ == "1") || (value_ == "on"))
+    boolean_ = true;
   else
     return 1;
 
@@ -149,14 +169,145 @@ parse_and_process(const std::string &value,
 
 static
 int
+parse_and_process(const std::string &value_,
+                  std::string       &str_)
+{
+  str_ = value_;
+
+  return 0;
+}
+
+static
+int
+parse_and_process(const std::string  &value_,
+                  Config::CacheFiles &cache_files_)
+{
+  Config::CacheFiles tmp;
+
+  tmp = value_;
+  if(!tmp.valid())
+    return 1;
+
+  cache_files_ = tmp;
+
+  return 0;
+}
+
+static
+int
+parse_and_process_errno(const std::string &value_,
+                        int               &errno_)
+{
+  if(value_ == "passthrough")
+    errno_ = 0;
+  else if(value_ == "nosys")
+    errno_ = ENOSYS;
+  else if(value_ == "noattr")
+    errno_ = ENOATTR;
+  else
+    return 1;
+
+  return 0;
+}
+
+static
+int
+parse_and_process_statfs(const std::string    &value_,
+                         Config::StatFS::Enum &enum_)
+{
+  if(value_ == "base")
+    enum_ = Config::StatFS::BASE;
+  else if(value_ == "full")
+    enum_ = Config::StatFS::FULL;
+  else
+    return 1;
+
+  return 0;
+}
+
+static
+int
+parse_and_process_statfsignore(const std::string          &value_,
+                               Config::StatFSIgnore::Enum &enum_)
+{
+  if(value_ == "none")
+    enum_ = Config::StatFSIgnore::NONE;
+  else if(value_ == "ro")
+    enum_ = Config::StatFSIgnore::RO;
+  else if(value_ == "nc")
+    enum_ = Config::StatFSIgnore::NC;
+  else
+    return 1;
+
+  return 0;
+}
+
+static
+int
+parse_and_process_statfs_cache(const std::string &value_)
+{
+  int rv;
+  uint64_t timeout;
+
+  rv = num::to_uint64_t(value_,timeout);
+  if(rv == -1)
+    return 1;
+
+  fs::statvfs_cache_timeout(timeout);
+
+  return 0;
+}
+
+static
+int
+parse_and_process_cache(Config       &config_,
+                        const string &func_,
+                        const string &value_,
+                        fuse_args    *outargs)
+{
+  if(func_ == "open")
+    return parse_and_process(value_,config_.open_cache.timeout);
+  else if(func_ == "statfs")
+    return parse_and_process_statfs_cache(value_);
+  else if(func_ == "entry")
+    return (set_kv_option(outargs,"entry_timeout",value_),0);
+  else if(func_ == "negative_entry")
+    return (set_kv_option(outargs,"negative_timeout",value_),0);
+  else if(func_ == "attr")
+    return (set_kv_option(outargs,"attr_timeout",value_),0);
+  else if(func_ == "symlinks")
+    return parse_and_process(value_,config_.cache_symlinks);
+  else if(func_ == "readdir")
+    return parse_and_process(value_,config_.cache_readdir);
+  else if(func_ == "files")
+    return parse_and_process(value_,config_.cache_files);
+
+  return 1;
+}
+
+static
+int
 parse_and_process_arg(Config            &config,
-                      const std::string &arg,
-                      fuse_args         *outargs)
+                      const std::string &arg)
 {
   if(arg == "defaults")
-    return (set_default_options(*outargs),0);
+    return 0;
+  else if(arg == "hard_remove")
+    return 0;
   else if(arg == "direct_io")
-    return (config.direct_io=true,1);
+    return (config.direct_io=true,0);
+  else if(arg == "kernel_cache")
+    return (config.kernel_cache=true,0);
+  else if(arg == "auto_cache")
+    return (config.auto_cache=true,0);
+  else if(arg == "async_read")
+    return (config.async_read=true,0);
+  else if(arg == "sync_read")
+    return (config.async_read=false,0);
+  else if(arg == "atomic_o_trunc")
+    return 0;
+  else if(arg == "big_writes")
+    return 0;
 
   return 1;
 }
@@ -165,11 +316,13 @@ static
 int
 parse_and_process_kv_arg(Config            &config,
                          const std::string &key,
-                         const std::string &value)
+                         const std::string &value,
+                         fuse_args         *outargs)
 {
-  int rv = -1;
+  int rv;
   std::vector<std::string> keypart;
 
+  rv = -1;
   str::split(keypart,key,'.');
   if(keypart.size() == 2)
     {
@@ -177,6 +330,8 @@ parse_and_process_kv_arg(Config            &config,
         rv = config.set_func_policy(keypart[1],value);
       else if(keypart[0] == "category")
         rv = config.set_category_policy(keypart[1],value);
+      else if(keypart[0] == "cache")
+        rv = parse_and_process_cache(config,keypart[1],value,outargs);
     }
   else
     {
@@ -194,6 +349,34 @@ parse_and_process_kv_arg(Config            &config,
         rv = parse_and_process(value,config.nullrw);
       else if(key == "ignorepponrename")
         rv = parse_and_process(value,config.ignorepponrename);
+      else if(key == "security_capability")
+        rv = parse_and_process(value,config.security_capability);
+      else if(key == "link_cow")
+        rv = parse_and_process(value,config.link_cow);
+      else if(key == "xattr")
+        rv = parse_and_process_errno(value,config.xattr);
+      else if(key == "statfs")
+        rv = parse_and_process_statfs(value,config.statfs);
+      else if(key == "statfs_ignore")
+        rv = parse_and_process_statfsignore(value,config.statfs_ignore);
+      else if(key == "fsname")
+        rv = parse_and_process(value,config.fsname);
+      else if(key == "posix_acl")
+        rv = parse_and_process(value,config.posix_acl);
+      else if(key == "direct_io")
+        rv = parse_and_process(value,config.direct_io);
+      else if(key == "kernel_cache")
+        rv = parse_and_process(value,config.kernel_cache);
+      else if(key == "auto_cache")
+        rv = parse_and_process(value,config.auto_cache);
+      else if(key == "async_read")
+        rv = parse_and_process(value,config.async_read);
+      else if(key == "max_write")
+        rv = 0;
+      else if(key == "fuse_msg_size")
+        rv = parse_and_process(value,config.fuse_msg_size,
+                               1,
+                               FUSE_MAX_MAX_PAGES);
     }
 
   if(rv == -1)
@@ -215,11 +398,11 @@ process_opt(Config            &config,
   switch(argvalue.size())
     {
     case 1:
-      rv = parse_and_process_arg(config,argvalue[0],outargs);
+      rv = parse_and_process_arg(config,argvalue[0]);
       break;
 
     case 2:
-      rv = parse_and_process_kv_arg(config,argvalue[0],argvalue[1]);
+      rv = parse_and_process_kv_arg(config,argvalue[0],argvalue[1],outargs);
       break;
 
     default:
@@ -232,16 +415,10 @@ process_opt(Config            &config,
 
 static
 int
-process_srcmounts(const char *arg,
-                  Config     &config)
+process_branches(const char *arg,
+                 Config     &config)
 {
-  vector<string> paths;
-
-  str::split(paths,arg,':');
-
-  fs::glob(paths,config.srcmounts);
-
-  fs::realpathize(config.srcmounts);
+  config.branches.set(arg);
 
   return 0;
 }
@@ -261,44 +438,89 @@ void
 usage(void)
 {
   std::cout <<
-    "Usage: mergerfs [options] <srcpaths> <destpath>\n"
+    "Usage: mergerfs [options] <branches> <destpath>\n"
     "\n"
     "    -o [opt,...]           mount options\n"
     "    -h --help              print help\n"
     "    -v --version           print version\n"
     "\n"
     "mergerfs options:\n"
-    "    <srcpaths>             ':' delimited list of directories. Supports\n"
+    "    <branches>             ':' delimited list of directories. Supports\n"
     "                           shell globbing (must be escaped in shell)\n"
-    "    -o defaults            Default FUSE options which seem to provide the\n"
-    "                           best performance: atomic_o_trunc, auto_cache,\n"
-    "                           big_writes, default_permissions, splice_read,\n"
-    "                           splice_write, splice_move\n"
     "    -o func.<f>=<p>        Set function <f> to policy <p>\n"
     "    -o category.<c>=<p>    Set functions in category <c> to <p>\n"
-    "    -o direct_io           Bypass additional caching, increases write\n"
-    "                           speeds at the cost of reads. Please read docs\n"
-    "                           for more details as there are tradeoffs.\n"
+    "    -o cache.open=<int>    'open' policy cache timeout in seconds.\n"
+    "                           default = 0 (disabled)\n"
+    "    -o cache.statfs=<int>  'statfs' cache timeout in seconds. Used by\n"
+    "                           policies. default = 0 (disabled)\n"
+    "    -o cache.files=libfuse|off|partial|full|auto-full\n"
+    "                           * libfuse: Use direct_io, kernel_cache, auto_cache\n"
+    "                             values directly\n"
+    "                           * off: Disable page caching\n"
+    "                           * partial: Clear page cache on file open\n"
+    "                           * full: Keep cache on file open\n"
+    "                           * auto-full: Keep cache if mtime & size not changed\n"
+    "                           default = libfuse\n"
+    "    -o cache.symlinks=<bool>\n"
+    "                           Enable kernel caching of symlinks (if supported)\n"
+    "                           default = false\n"
+    "    -o cache.readdir=<bool>\n"
+    "                           Enable kernel caching readdir (if supported)\n"
+    "                           default = false\n"
+    "    -o cache.attr=<int>    File attribute cache timeout in seconds.\n"
+    "                           default = 1\n"
+    "    -o cache.entry=<int>   File name lookup cache timeout in seconds.\n"
+    "                           default = 1\n"
+    "    -o cache.negative_entry=<int>\n"
+    "                           Negative file name lookup cache timeout in\n"
+    "                           seconds. default = 0\n"
     "    -o use_ino             Have mergerfs generate inode values rather than\n"
     "                           autogenerated by libfuse. Suggested.\n"
-    "    -o minfreespace=<int>  minimum free space needed for certain policies.\n"
-    "                           default=4G\n"
+    "    -o minfreespace=<int>  Minimum free space needed for certain policies.\n"
+    "                           default = 4G\n"
     "    -o moveonenospc=<bool> Try to move file to another drive when ENOSPC\n"
-    "                           on write. default=false\n"
+    "                           on write. default = false\n"
     "    -o dropcacheonclose=<bool>\n"
     "                           When a file is closed suggest to OS it drop\n"
-    "                           the file's cache. This is useful when direct_io\n"
-    "                           is disabled. default=false\n"
+    "                           the file's cache. This is useful when using\n"
+    "                           'cache.files'. default = false\n"
     "    -o symlinkify=<bool>   Read-only files, after a timeout, will be turned\n"
     "                           into symlinks. Read docs for limitations and\n"
-    "                           possible issues. default=false\n"
+    "                           possible issues. default = false\n"
     "    -o symlinkify_timeout=<int>\n"
-    "                           timeout in seconds before will turn to symlinks.\n"
-    "                           default=3600\n"
+    "                           Timeout in seconds before files turn to symlinks.\n"
+    "                           default = 3600\n"
     "    -o nullrw=<bool>       Disables reads and writes. For benchmarking.\n"
+    "                           default = false\n"
     "    -o ignorepponrename=<bool>\n"
     "                           Ignore path preserving when performing renames\n"
     "                           and links. default = false\n"
+    "    -o link_cow=<bool>     Delink/clone file on open to simulate CoW.\n"
+    "                           default = false\n"
+    "    -o security_capability=<bool>\n"
+    "                           When disabled return ENOATTR when the xattr\n"
+    "                           security.capability is queried. default = true\n"
+    "    -o xattr=passthrough|noattr|nosys\n"
+    "                           Runtime control of xattrs. By default xattr\n"
+    "                           requests will pass through to the underlying\n"
+    "                           filesystems. notattr will short circuit as if\n"
+    "                           nothing exists. nosys will respond as if not\n"
+    "                           supported or disabled. default = passthrough\n"
+    "    -o statfs=base|full    When set to 'base' statfs will use all branches\n"
+    "                           when performing statfs calculations. 'full' will\n"
+    "                           only include branches on which that path is\n"
+    "                           available. default = base\n"
+    "    -o statfs_ignore=none|ro|nc\n"
+    "                           'ro' will cause statfs calculations to ignore\n"
+    "                           available space for branches mounted or tagged\n"
+    "                           as 'read only' or 'no create'. 'nc' will ignore\n"
+    "                           available space for branches tagged as\n"
+    "                           'no create'. default = none\n"
+    "    -o posix_acl=<bool>    Enable POSIX ACL support. default = false\n"
+    "    -o async_read=<bool>   If disabled or unavailable the kernel will\n"
+    "                           ensure there is at most one pending read \n"
+    "                           request per file and will attempt to order\n"
+    "                           requests by offset. default = true\n"
             << std::endl;
 }
 
@@ -319,8 +541,8 @@ option_processor(void       *data,
       break;
 
     case FUSE_OPT_KEY_NONOPT:
-      rv = config.srcmounts.empty() ?
-        process_srcmounts(arg,config) :
+      rv = config.branches.empty() ?
+        process_branches(arg,config) :
         process_destmounts(arg,config);
       break;
 
@@ -345,32 +567,29 @@ option_processor(void       *data,
   return rv;
 }
 
-namespace mergerfs
+namespace options
 {
-  namespace options
+  void
+  parse(fuse_args *args_,
+        Config    *config_)
   {
-    void
-    parse(fuse_args &args,
-          Config    &config)
-    {
-      const struct fuse_opt opts[] =
-        {
-          FUSE_OPT_KEY("-h",MERGERFS_OPT_HELP),
-          FUSE_OPT_KEY("--help",MERGERFS_OPT_HELP),
-          FUSE_OPT_KEY("-v",MERGERFS_OPT_VERSION),
-          FUSE_OPT_KEY("-V",MERGERFS_OPT_VERSION),
-          FUSE_OPT_KEY("--version",MERGERFS_OPT_VERSION),
-          {NULL,-1U,0}
-        };
+    const struct fuse_opt opts[] =
+      {
+        FUSE_OPT_KEY("-h",MERGERFS_OPT_HELP),
+        FUSE_OPT_KEY("--help",MERGERFS_OPT_HELP),
+        FUSE_OPT_KEY("-v",MERGERFS_OPT_VERSION),
+        FUSE_OPT_KEY("-V",MERGERFS_OPT_VERSION),
+        FUSE_OPT_KEY("--version",MERGERFS_OPT_VERSION),
+        {NULL,-1U,0}
+      };
 
+    fuse_opt_parse(args_,
+                   config_,
+                   opts,
+                   ::option_processor);
 
-      fuse_opt_parse(&args,
-                     &config,
-                     opts,
-                     ::option_processor);
-
-      set_fsname(args,config.srcmounts);
-      set_subtype(args);
-    }
+    set_default_options(args_);
+    set_fsname(args_,config_);
+    set_subtype(args_);
   }
 }

@@ -39,9 +39,9 @@ namespace fs
   static
   inline
   int
-  utime(const int             fd,
-        const struct timespec times[2])
+  futimens(const int             fd_,
+           const struct timespec ts_[2])
   {
-    return ::futimens(fd,times);
+    return ::futimens(fd_,ts_);
   }
 }

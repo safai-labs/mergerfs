@@ -14,91 +14,136 @@
   OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 */
 
-#include <string>
-#include <vector>
-
 #include "errno.hpp"
 #include "fs.hpp"
+#include "fs_exists.hpp"
+#include "fs_info.hpp"
 #include "fs_path.hpp"
+#include "fs_statvfs_cache.hpp"
 #include "policy.hpp"
+#include "policy_error.hpp"
+
+#include <string>
+#include <vector>
 
 using std::string;
 using std::vector;
 
-static
-int
-_epall_create(const vector<string>  &basepaths,
-              const char            *fusepath,
-              const uint64_t         minfreespace,
-              vector<const string*> &paths)
+namespace epall
 {
-  string fullpath;
-
-  for(size_t i = 0, ei = basepaths.size(); i != ei; i++)
-    {
-      bool readonly;
-      uint64_t spaceavail;
-      uint64_t _spaceused;
-      const string *basepath = &basepaths[i];
-
-      fs::path::make(basepath,fusepath,fullpath);
-
-      if(!fs::exists(fullpath))
-        continue;
-      if(!fs::info(*basepath,readonly,spaceavail,_spaceused))
-        continue;
-      if(readonly)
-        continue;
-      if(spaceavail < minfreespace)
-        continue;
-
-      paths.push_back(basepath);
-    }
-
-  if(paths.empty())
-    return POLICY_FAIL_ENOENT;
-
-  return POLICY_SUCCESS;
-}
-
-static
-int
-_epall_other(const vector<string>  &basepaths,
-             const char            *fusepath,
-             vector<const string*> &paths)
-{
-  string fullpath;
-
-  for(size_t i = 0, ei = basepaths.size(); i != ei; i++)
-    {
-      const string *basepath = &basepaths[i];
-
-      fs::path::make(basepath,fusepath,fullpath);
-
-      if(!fs::exists(fullpath))
-        continue;
-
-      paths.push_back(basepath);
-    }
-
-  if(paths.empty())
-    return POLICY_FAIL_ENOENT;
-
-  return POLICY_SUCCESS;
-}
-
-namespace mergerfs
-{
+  static
   int
-  Policy::Func::epall(const Category::Enum::Type  type,
-                      const vector<string>       &basepaths,
-                      const char                 *fusepath,
-                      const uint64_t              minfreespace,
-                      vector<const string*>      &paths)
+  create(const Branches        &branches_,
+         const char            *fusepath,
+         const uint64_t         minfreespace,
+         vector<const string*> &paths)
   {
-    if(type == Category::Enum::create)
-      return _epall_create(basepaths,fusepath,minfreespace,paths);
+    int rv;
+    int error;
+    fs::info_t info;
+    const Branch *branch;
 
-    return _epall_other(basepaths,fusepath,paths);
+    error = ENOENT;
+    for(size_t i = 0, ei = branches_.size(); i != ei; i++)
+      {
+        branch = &branches_[i];
+
+        if(!fs::exists(branch->path,fusepath))
+          error_and_continue(error,ENOENT);
+        if(branch->ro_or_nc())
+          error_and_continue(error,EROFS);
+        rv = fs::info(&branch->path,&info);
+        if(rv == -1)
+          error_and_continue(error,ENOENT);
+        if(info.readonly)
+          error_and_continue(error,EROFS);
+        if(info.spaceavail < minfreespace)
+          error_and_continue(error,ENOSPC);
+
+        paths.push_back(&branch->path);
+      }
+
+    if(paths.empty())
+      return (errno=error,-1);
+
+    return 0;
   }
+
+  static
+  int
+  action(const Branches        &branches_,
+         const char            *fusepath,
+         vector<const string*> &paths)
+  {
+    int rv;
+    int error;
+    bool readonly;
+    const Branch *branch;
+
+    error = ENOENT;
+    for(size_t i = 0, ei = branches_.size(); i != ei; i++)
+      {
+        branch = &branches_[i];
+
+        if(!fs::exists(branch->path,fusepath))
+          error_and_continue(error,ENOENT);
+        if(branch->ro())
+          error_and_continue(error,EROFS);
+        rv = fs::statvfs_cache_readonly(branch->path,&readonly);
+        if(rv == -1)
+          error_and_continue(error,ENOENT);
+        if(readonly)
+          error_and_continue(error,EROFS);
+
+        paths.push_back(&branch->path);
+      }
+
+    if(paths.empty())
+      return (errno=error,-1);
+
+    return 0;
+  }
+
+  static
+  int
+  search(const Branches        &branches_,
+         const char            *fusepath,
+         vector<const string*> &paths)
+  {
+    const Branch *branch;
+
+    for(size_t i = 0, ei = branches_.size(); i != ei; i++)
+      {
+        branch = &branches_[i];
+
+        if(!fs::exists(branch->path,fusepath))
+          continue;
+
+        paths.push_back(&branch->path);
+      }
+
+    if(paths.empty())
+      return (errno=ENOENT,-1);
+
+    return 0;
+  }
+}
+
+int
+Policy::Func::epall(const Category::Enum::Type  type,
+                    const Branches             &branches_,
+                    const char                 *fusepath,
+                    const uint64_t              minfreespace,
+                    vector<const string*>      &paths)
+{
+  switch(type)
+    {
+    case Category::Enum::create:
+      return epall::create(branches_,fusepath,minfreespace,paths);
+    case Category::Enum::action:
+      return epall::action(branches_,fusepath,paths);
+    case Category::Enum::search:
+    default:
+      return epall::search(branches_,fusepath,paths);
+    }
 }

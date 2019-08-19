@@ -352,6 +352,8 @@ static void fill_open(struct fuse_open_out *arg,
 		arg->open_flags |= FOPEN_KEEP_CACHE;
 	if (f->nonseekable)
 		arg->open_flags |= FOPEN_NONSEEKABLE;
+        if (f->cache_readdir)
+                arg->open_flags |= FOPEN_CACHE_DIR;
 }
 
 int fuse_reply_entry(fuse_req_t req, const struct fuse_entry_param *e)
@@ -916,23 +918,28 @@ enomem:
 	goto out;
 }
 
-int fuse_reply_ioctl(fuse_req_t req, int result, const void *buf, size_t size)
+int fuse_reply_ioctl(fuse_req_t req, int result, const void *buf, uint32_t size)
 {
-	struct fuse_ioctl_out arg;
+	int count;
 	struct iovec iov[3];
-	size_t count = 1;
+        struct fuse_ioctl_out arg;
 
-	memset(&arg, 0, sizeof(arg));
-	arg.result = result;
+	arg.result   = result;
+        arg.flags    = 0;
+        arg.in_iovs  = 0;
+        arg.out_iovs = 0;
+
+        count = 1;
 	iov[count].iov_base = &arg;
-	iov[count].iov_len = sizeof(arg);
+	iov[count].iov_len  = sizeof(arg);
 	count++;
 
-	if (size) {
-		iov[count].iov_base = (char *) buf;
-		iov[count].iov_len = size;
-		count++;
-	}
+	if(size)
+          {
+            iov[count].iov_base = (char*)buf;
+            iov[count].iov_len  = size;
+            count++;
+          }
 
 	return send_reply_iov(req, 0, iov, count);
 }
@@ -1036,7 +1043,6 @@ static void do_getattr(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 		if (arg->getattr_flags & FUSE_GETATTR_FH) {
 			memset(&fi, 0, sizeof(fi));
 			fi.fh = arg->fh;
-			fi.fh_old = fi.fh;
 			fip = &fi;
 		}
 	}
@@ -1062,7 +1068,6 @@ static void do_setattr(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 			memset(&fi_store, 0, sizeof(fi_store));
 			fi = &fi_store;
 			fi->fh = arg->fh;
-			fi->fh_old = fi->fh;
 		}
 		arg->valid &=
 			FUSE_SET_ATTR_MODE	|
@@ -1225,7 +1230,6 @@ static void do_read(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 
 		memset(&fi, 0, sizeof(fi));
 		fi.fh = arg->fh;
-		fi.fh_old = fi.fh;
 		if (req->f->conn.proto_minor >= 9) {
 			fi.lock_owner = arg->lock_owner;
 			fi.flags = arg->flags;
@@ -1243,7 +1247,6 @@ static void do_write(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 
 	memset(&fi, 0, sizeof(fi));
 	fi.fh = arg->fh;
-	fi.fh_old = fi.fh;
 	fi.writepage = arg->write_flags & 1;
 
 	if (req->f->conn.proto_minor < 9) {
@@ -1274,7 +1277,6 @@ static void do_write_buf(fuse_req_t req, fuse_ino_t nodeid, const void *inarg,
 
 	memset(&fi, 0, sizeof(fi));
 	fi.fh = arg->fh;
-	fi.fh_old = fi.fh;
 	fi.writepage = arg->write_flags & 1;
 
 	if (req->f->conn.proto_minor < 9) {
@@ -1313,7 +1315,6 @@ static void do_flush(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 
 	memset(&fi, 0, sizeof(fi));
 	fi.fh = arg->fh;
-	fi.fh_old = fi.fh;
 	fi.flush = 1;
 	if (req->f->conn.proto_minor >= 7)
 		fi.lock_owner = arg->lock_owner;
@@ -1332,7 +1333,6 @@ static void do_release(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 	memset(&fi, 0, sizeof(fi));
 	fi.flags = arg->flags;
 	fi.fh = arg->fh;
-	fi.fh_old = fi.fh;
 	if (req->f->conn.proto_minor >= 8) {
 		fi.flush = (arg->release_flags & FUSE_RELEASE_FLUSH) ? 1 : 0;
 		fi.lock_owner = arg->lock_owner;
@@ -1355,7 +1355,6 @@ static void do_fsync(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 
 	memset(&fi, 0, sizeof(fi));
 	fi.fh = arg->fh;
-	fi.fh_old = fi.fh;
 
 	if (req->f->op.fsync)
 		req->f->op.fsync(req, nodeid, arg->fsync_flags & 1, &fi);
@@ -1384,7 +1383,6 @@ static void do_readdir(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 
 	memset(&fi, 0, sizeof(fi));
 	fi.fh = arg->fh;
-	fi.fh_old = fi.fh;
 
 	if (req->f->op.readdir)
 		req->f->op.readdir(req, nodeid, arg->size, arg->offset, &fi);
@@ -1400,7 +1398,6 @@ static void do_releasedir(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 	memset(&fi, 0, sizeof(fi));
 	fi.flags = arg->flags;
 	fi.fh = arg->fh;
-	fi.fh_old = fi.fh;
 
 	if (req->f->op.releasedir)
 		req->f->op.releasedir(req, nodeid, &fi);
@@ -1415,7 +1412,6 @@ static void do_fsyncdir(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 
 	memset(&fi, 0, sizeof(fi));
 	fi.fh = arg->fh;
-	fi.fh_old = fi.fh;
 
 	if (req->f->op.fsyncdir)
 		req->f->op.fsyncdir(req, nodeid, arg->fsync_flags & 1, &fi);
@@ -1670,7 +1666,6 @@ static void do_ioctl(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 
 	memset(&fi, 0, sizeof(fi));
 	fi.fh = arg->fh;
-	fi.fh_old = fi.fh;
 
 	if (sizeof(void *) == 4 && req->f->conn.proto_minor >= 16 &&
 	    !(flags & FUSE_IOCTL_32BIT)) {
@@ -1697,7 +1692,6 @@ static void do_poll(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 
 	memset(&fi, 0, sizeof(fi));
 	fi.fh = arg->fh;
-	fi.fh_old = fi.fh;
 
 	if (req->f->op.poll) {
 		struct fuse_pollhandle *ph = NULL;
@@ -1755,8 +1749,10 @@ static void do_init(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 	f->conn.want = 0;
 
 	memset(&outarg, 0, sizeof(outarg));
-	outarg.major = FUSE_KERNEL_VERSION;
-	outarg.minor = FUSE_KERNEL_MINOR_VERSION;
+
+	outarg.major     = FUSE_KERNEL_VERSION;
+	outarg.minor     = FUSE_KERNEL_MINOR_VERSION;
+        outarg.max_pages = FUSE_DEFAULT_MAX_PAGES_PER_REQ;
 
 	if (arg->major < 7) {
 		fprintf(stderr, "fuse: unsupported protocol version: %u.%u\n",
@@ -1772,8 +1768,6 @@ static void do_init(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 	}
 
 	if (arg->minor >= 6) {
-		if (f->conn.async_read)
-			f->conn.async_read = arg->flags & FUSE_ASYNC_READ;
 		if (arg->max_readahead < f->conn.max_readahead)
 			f->conn.max_readahead = arg->max_readahead;
 		if (arg->flags & FUSE_ASYNC_READ)
@@ -1790,8 +1784,18 @@ static void do_init(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 			f->conn.capable |= FUSE_CAP_DONT_MASK;
 		if (arg->flags & FUSE_FLOCK_LOCKS)
 			f->conn.capable |= FUSE_CAP_FLOCK_LOCKS;
+                if (arg->flags & FUSE_POSIX_ACL)
+                        f->conn.capable |= FUSE_CAP_POSIX_ACL;
+                if (arg->flags & FUSE_CACHE_SYMLINKS)
+                        f->conn.capable |= FUSE_CAP_CACHE_SYMLINKS;
+                if (arg->flags & FUSE_ASYNC_DIO)
+                        f->conn.capable |= FUSE_CAP_ASYNC_DIO;
+                if (arg->flags & FUSE_PARALLEL_DIROPS)
+                        f->conn.capable |= FUSE_CAP_PARALLEL_DIROPS;
+                if (arg->flags & FUSE_MAX_PAGES)
+                        f->conn.capable |= FUSE_CAP_MAX_PAGES;
 	} else {
-		f->conn.async_read = 0;
+                f->conn.want &= ~FUSE_CAP_ASYNC_READ;
 		f->conn.max_readahead = 0;
 	}
 
@@ -1812,14 +1816,10 @@ static void do_init(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 	if (req->f->conn.proto_minor >= 18)
 		f->conn.capable |= FUSE_CAP_IOCTL_DIR;
 
-	if (f->atomic_o_trunc)
-		f->conn.want |= FUSE_CAP_ATOMIC_O_TRUNC;
 	if (f->op.getlk && f->op.setlk && !f->no_remote_posix_lock)
 		f->conn.want |= FUSE_CAP_POSIX_LOCKS;
 	if (f->op.flock && !f->no_remote_flock)
 		f->conn.want |= FUSE_CAP_FLOCK_LOCKS;
-	if (f->big_writes)
-		f->conn.want |= FUSE_CAP_BIG_WRITES;
 
 	if (bufsize < FUSE_MIN_READ_BUFFER) {
 		fprintf(stderr, "fuse: warning: buffer size too small: %zu\n",
@@ -1842,7 +1842,13 @@ static void do_init(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 	if (f->no_splice_move)
 		f->conn.want &= ~FUSE_CAP_SPLICE_MOVE;
 
-	if (f->conn.async_read || (f->conn.want & FUSE_CAP_ASYNC_READ))
+        if ((arg->flags & FUSE_MAX_PAGES) && (f->conn.want & FUSE_CAP_MAX_PAGES))
+          {
+            outarg.flags     |= FUSE_MAX_PAGES;
+            outarg.max_pages  = f->conn.max_pages;
+          }
+
+	if (f->conn.want & FUSE_CAP_ASYNC_READ)
 		outarg.flags |= FUSE_ASYNC_READ;
 	if (f->conn.want & FUSE_CAP_POSIX_LOCKS)
 		outarg.flags |= FUSE_POSIX_LOCKS;
@@ -1856,6 +1862,14 @@ static void do_init(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 		outarg.flags |= FUSE_DONT_MASK;
 	if (f->conn.want & FUSE_CAP_FLOCK_LOCKS)
 		outarg.flags |= FUSE_FLOCK_LOCKS;
+        if (f->conn.want & FUSE_CAP_POSIX_ACL)
+                outarg.flags |= FUSE_POSIX_ACL;
+        if (f->conn.want & FUSE_CAP_CACHE_SYMLINKS)
+                outarg.flags |= FUSE_CACHE_SYMLINKS;
+        if (f->conn.want & FUSE_CAP_ASYNC_DIO)
+                outarg.flags |= FUSE_ASYNC_DIO;
+        if (f->conn.want & FUSE_CAP_PARALLEL_DIROPS)
+                outarg.flags |= FUSE_PARALLEL_DIROPS;
 	outarg.max_readahead = f->conn.max_readahead;
 	outarg.max_write = f->conn.max_write;
 	if (f->conn.proto_minor >= 13) {
@@ -1882,9 +1896,18 @@ static void do_init(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 			outarg.max_background);
 		fprintf(stderr, "   congestion_threshold=%i\n",
 		        outarg.congestion_threshold);
+                fprintf(stderr, "   max_pages=%d\n",outarg.max_pages);
 	}
 
-	send_reply_ok(req, &outarg, arg->minor < 5 ? 8 : sizeof(outarg));
+        size_t outargsize;
+        if(arg->minor < 5)
+          outargsize = FUSE_COMPAT_INIT_OUT_SIZE;
+        else if(arg->minor < 23)
+          outargsize = FUSE_COMPAT_22_INIT_OUT_SIZE;
+        else
+          outargsize = sizeof(outarg);
+
+	send_reply_ok(req, &outarg, outargsize);
 }
 
 static void do_destroy(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
@@ -1944,6 +1967,34 @@ static void do_notify_reply(fuse_req_t req, fuse_ino_t nodeid,
 
 	if (nreq != head)
 		nreq->reply(nreq, req, nodeid, inarg, buf);
+}
+
+static
+void
+do_copy_file_range(fuse_req_t  req_,
+                   fuse_ino_t  nodeid_in_,
+                   const void *arg_)
+
+{
+  struct fuse_file_info ffi_in  = {0};
+  struct fuse_file_info ffi_out = {0};
+  struct fuse_copy_file_range_in *arg = (struct fuse_copy_file_range_in*)arg_;
+
+  ffi_in.fh  = arg->fh_in;
+  ffi_out.fh = arg->fh_out;
+
+  if(req_->f->op.copy_file_range == NULL)
+    fuse_reply_err(req_,ENOSYS);
+  else
+    req_->f->op.copy_file_range(req_,
+                                nodeid_in_,
+                                arg->off_in,
+                                &ffi_in,
+                                arg->nodeid_out,
+                                arg->off_out,
+                                &ffi_out,
+                                arg->len,
+                                arg->flags);
 }
 
 static int send_notify_iov(struct fuse_ll *f, struct fuse_chan *ch,
@@ -2246,50 +2297,52 @@ int fuse_req_interrupted(fuse_req_t req)
 static struct {
 	void (*func)(fuse_req_t, fuse_ino_t, const void *);
 	const char *name;
-} fuse_ll_ops[] = {
-	[FUSE_LOOKUP]	   = { do_lookup,      "LOOKUP"	     },
-	[FUSE_FORGET]	   = { do_forget,      "FORGET"	     },
-	[FUSE_GETATTR]	   = { do_getattr,     "GETATTR"     },
-	[FUSE_SETATTR]	   = { do_setattr,     "SETATTR"     },
-	[FUSE_READLINK]	   = { do_readlink,    "READLINK"    },
-	[FUSE_SYMLINK]	   = { do_symlink,     "SYMLINK"     },
-	[FUSE_MKNOD]	   = { do_mknod,       "MKNOD"	     },
-	[FUSE_MKDIR]	   = { do_mkdir,       "MKDIR"	     },
-	[FUSE_UNLINK]	   = { do_unlink,      "UNLINK"	     },
-	[FUSE_RMDIR]	   = { do_rmdir,       "RMDIR"	     },
-	[FUSE_RENAME]	   = { do_rename,      "RENAME"	     },
-	[FUSE_LINK]	   = { do_link,	       "LINK"	     },
-	[FUSE_OPEN]	   = { do_open,	       "OPEN"	     },
-	[FUSE_READ]	   = { do_read,	       "READ"	     },
-	[FUSE_WRITE]	   = { do_write,       "WRITE"	     },
-	[FUSE_STATFS]	   = { do_statfs,      "STATFS"	     },
-	[FUSE_RELEASE]	   = { do_release,     "RELEASE"     },
-	[FUSE_FSYNC]	   = { do_fsync,       "FSYNC"	     },
-	[FUSE_SETXATTR]	   = { do_setxattr,    "SETXATTR"    },
-	[FUSE_GETXATTR]	   = { do_getxattr,    "GETXATTR"    },
-	[FUSE_LISTXATTR]   = { do_listxattr,   "LISTXATTR"   },
-	[FUSE_REMOVEXATTR] = { do_removexattr, "REMOVEXATTR" },
-	[FUSE_FLUSH]	   = { do_flush,       "FLUSH"	     },
-	[FUSE_INIT]	   = { do_init,	       "INIT"	     },
-	[FUSE_OPENDIR]	   = { do_opendir,     "OPENDIR"     },
-	[FUSE_READDIR]	   = { do_readdir,     "READDIR"     },
-	[FUSE_RELEASEDIR]  = { do_releasedir,  "RELEASEDIR"  },
-	[FUSE_FSYNCDIR]	   = { do_fsyncdir,    "FSYNCDIR"    },
-	[FUSE_GETLK]	   = { do_getlk,       "GETLK"	     },
-	[FUSE_SETLK]	   = { do_setlk,       "SETLK"	     },
-	[FUSE_SETLKW]	   = { do_setlkw,      "SETLKW"	     },
-	[FUSE_ACCESS]	   = { do_access,      "ACCESS"	     },
-	[FUSE_CREATE]	   = { do_create,      "CREATE"	     },
-	[FUSE_INTERRUPT]   = { do_interrupt,   "INTERRUPT"   },
-	[FUSE_BMAP]	   = { do_bmap,	       "BMAP"	     },
-	[FUSE_IOCTL]	   = { do_ioctl,       "IOCTL"	     },
-	[FUSE_POLL]	   = { do_poll,        "POLL"	     },
-	[FUSE_FALLOCATE]   = { do_fallocate,   "FALLOCATE"   },
-	[FUSE_DESTROY]	   = { do_destroy,     "DESTROY"     },
-	[FUSE_NOTIFY_REPLY] = { (void *) 1,    "NOTIFY_REPLY" },
-	[FUSE_BATCH_FORGET] = { do_batch_forget, "BATCH_FORGET" },
-	[CUSE_INIT]	   = { cuse_lowlevel_init, "CUSE_INIT"   },
-};
+} fuse_ll_ops[] =
+  {
+    [FUSE_LOOKUP]          = { do_lookup,          "LOOKUP"	     },
+    [FUSE_FORGET]          = { do_forget,          "FORGET"	     },
+    [FUSE_GETATTR]         = { do_getattr,         "GETATTR"         },
+    [FUSE_SETATTR]         = { do_setattr,         "SETATTR"         },
+    [FUSE_READLINK]        = { do_readlink,        "READLINK"        },
+    [FUSE_SYMLINK]         = { do_symlink,         "SYMLINK"         },
+    [FUSE_MKNOD]           = { do_mknod,           "MKNOD"	     },
+    [FUSE_MKDIR]           = { do_mkdir,           "MKDIR"	     },
+    [FUSE_UNLINK]          = { do_unlink,          "UNLINK"	     },
+    [FUSE_RMDIR]           = { do_rmdir,           "RMDIR"	     },
+    [FUSE_RENAME]          = { do_rename,          "RENAME"	     },
+    [FUSE_LINK]            = { do_link,	           "LINK"	     },
+    [FUSE_OPEN]            = { do_open,	           "OPEN"	     },
+    [FUSE_READ]            = { do_read,	           "READ"	     },
+    [FUSE_WRITE]           = { do_write,           "WRITE"	     },
+    [FUSE_STATFS]          = { do_statfs,          "STATFS"	     },
+    [FUSE_RELEASE]         = { do_release,         "RELEASE"         },
+    [FUSE_FSYNC]           = { do_fsync,           "FSYNC"	     },
+    [FUSE_SETXATTR]        = { do_setxattr,        "SETXATTR"        },
+    [FUSE_GETXATTR]        = { do_getxattr,        "GETXATTR"        },
+    [FUSE_LISTXATTR]       = { do_listxattr,       "LISTXATTR"       },
+    [FUSE_REMOVEXATTR]     = { do_removexattr,     "REMOVEXATTR"     },
+    [FUSE_FLUSH]           = { do_flush,           "FLUSH"	     },
+    [FUSE_INIT]            = { do_init,	           "INIT"	     },
+    [FUSE_OPENDIR]         = { do_opendir,         "OPENDIR"         },
+    [FUSE_READDIR]         = { do_readdir,         "READDIR"         },
+    [FUSE_RELEASEDIR]      = { do_releasedir,      "RELEASEDIR"      },
+    [FUSE_FSYNCDIR]        = { do_fsyncdir,        "FSYNCDIR"        },
+    [FUSE_GETLK]           = { do_getlk,           "GETLK"	     },
+    [FUSE_SETLK]           = { do_setlk,           "SETLK"	     },
+    [FUSE_SETLKW]          = { do_setlkw,          "SETLKW"	     },
+    [FUSE_ACCESS]          = { do_access,          "ACCESS"	     },
+    [FUSE_CREATE]          = { do_create,          "CREATE"	     },
+    [FUSE_INTERRUPT]       = { do_interrupt,       "INTERRUPT"       },
+    [FUSE_BMAP]            = { do_bmap,	           "BMAP"	     },
+    [FUSE_IOCTL]           = { do_ioctl,           "IOCTL"	     },
+    [FUSE_POLL]            = { do_poll,            "POLL"	     },
+    [FUSE_FALLOCATE]       = { do_fallocate,       "FALLOCATE"       },
+    [FUSE_DESTROY]         = { do_destroy,         "DESTROY"         },
+    [FUSE_NOTIFY_REPLY]    = { (void *) 1,         "NOTIFY_REPLY"    },
+    [FUSE_BATCH_FORGET]    = { do_batch_forget,    "BATCH_FORGET"    },
+    [FUSE_COPY_FILE_RANGE] = { do_copy_file_range, "COPY_FILE_RANGE" },
+    [CUSE_INIT]            = { cuse_lowlevel_init, "CUSE_INIT"       },
+  };
 
 #define FUSE_MAXOP (sizeof(fuse_ll_ops) / sizeof(fuse_ll_ops[0]))
 
@@ -2474,19 +2527,14 @@ static const struct fuse_opt fuse_ll_opts[] = {
 	{ "debug", offsetof(struct fuse_ll, debug), 1 },
 	{ "-d", offsetof(struct fuse_ll, debug), 1 },
 	{ "allow_root", offsetof(struct fuse_ll, allow_root), 1 },
-	{ "max_write=%u", offsetof(struct fuse_ll, conn.max_write), 0 },
 	{ "max_readahead=%u", offsetof(struct fuse_ll, conn.max_readahead), 0 },
 	{ "max_background=%u", offsetof(struct fuse_ll, conn.max_background), 0 },
 	{ "congestion_threshold=%u",
 	  offsetof(struct fuse_ll, conn.congestion_threshold), 0 },
-	{ "async_read", offsetof(struct fuse_ll, conn.async_read), 1 },
-	{ "sync_read", offsetof(struct fuse_ll, conn.async_read), 0 },
-	{ "atomic_o_trunc", offsetof(struct fuse_ll, atomic_o_trunc), 1},
 	{ "no_remote_lock", offsetof(struct fuse_ll, no_remote_posix_lock), 1},
 	{ "no_remote_lock", offsetof(struct fuse_ll, no_remote_flock), 1},
 	{ "no_remote_flock", offsetof(struct fuse_ll, no_remote_flock), 1},
 	{ "no_remote_posix_lock", offsetof(struct fuse_ll, no_remote_posix_lock), 1},
-	{ "big_writes", offsetof(struct fuse_ll, big_writes), 1},
 	{ "splice_write", offsetof(struct fuse_ll, splice_write), 1},
 	{ "no_splice_write", offsetof(struct fuse_ll, no_splice_write), 1},
 	{ "splice_move", offsetof(struct fuse_ll, splice_move), 1},
@@ -2510,14 +2558,9 @@ static void fuse_ll_version(void)
 static void fuse_ll_help(void)
 {
 	fprintf(stderr,
-"    -o max_write=N         set maximum size of write requests\n"
 "    -o max_readahead=N     set maximum readahead\n"
 "    -o max_background=N    set number of maximum background requests\n"
 "    -o congestion_threshold=N  set kernel's congestion threshold\n"
-"    -o async_read          perform reads asynchronously (default)\n"
-"    -o sync_read           perform reads synchronously\n"
-"    -o atomic_o_trunc      enable atomic open+truncate support\n"
-"    -o big_writes          enable larger than 4kB writes\n"
 "    -o no_remote_lock      disable remote file locking\n"
 "    -o no_remote_flock     disable remote file locking (BSD)\n"
 "    -o no_remote_posix_lock disable remove file locking (POSIX)\n"
@@ -2720,10 +2763,8 @@ struct fuse_session *fuse_lowlevel_new_common(struct fuse_args *args,
 		goto out;
 	}
 
-	f->conn.async_read = 1;
 	f->conn.max_write = UINT_MAX;
 	f->conn.max_readahead = UINT_MAX;
-	f->atomic_o_trunc = 0;
 	list_init_req(&f->list);
 	list_init_req(&f->interrupts);
 	list_init_nreq(&f->notify_list);

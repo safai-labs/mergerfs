@@ -27,42 +27,22 @@ namespace fs
   using std::string;
   using std::vector;
 
-  bool exists(const string &path,
-              struct stat  &st);
-  bool exists(const string &path);
+  void findallfiles(const vector<string> &basepaths_,
+                    const char           *fusepath_,
+                    vector<string>       &paths_);
 
-  bool info(const string &path,
-            bool         &readonly,
-            uint64_t     &spaceavail,
-            uint64_t     &spaceused);
+  int findonfs(const vector<string> &basepaths_,
+               const string         &fusepath_,
+               const int             fd_,
+               string               &basepath_);
 
-  bool readonly(const string &path);
+  void realpathize(vector<string> &strs_);
 
-  bool spaceavail(const string &path,
-                  uint64_t     &spaceavail);
+  int getfl(const int fd_);
+  int setfl(const int    fd_,
+            const mode_t mode_);
 
-  bool spaceused(const string &path,
-                 uint64_t     &spaceavail);
-
-  void findallfiles(const vector<string> &srcmounts,
-                    const char           *fusepath,
-                    vector<string>       &paths);
-
-  int findonfs(const vector<string> &srcmounts,
-               const string         &fusepath,
-               const int             fd,
-               string               &basepath);
-
-  void glob(const vector<string> &patterns,
-            vector<string>       &strs);
-
-  void realpathize(vector<string> &strs);
-
-  int getfl(const int fd);
-  int setfl(const int    fd,
-            const mode_t mode);
-
-  int mfs(const vector<string> &srcs,
-          const uint64_t        minfreespace,
-          string               &path);
-};
+  int mfs(const vector<string> &srcs_,
+          const uint64_t        minfreespace_,
+          string               &path_);
+}

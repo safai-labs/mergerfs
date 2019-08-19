@@ -14,92 +14,66 @@
   OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 */
 
-#include <string>
-#include <vector>
-
 #include "errno.hpp"
 #include "fs.hpp"
+#include "fs_exists.hpp"
+#include "fs_info.hpp"
 #include "fs_path.hpp"
 #include "policy.hpp"
+#include "policy_error.hpp"
+
+#include <string>
+#include <vector>
 
 using std::string;
 using std::vector;
 
-static
-int
-_ff_create(const vector<string>  &basepaths,
-           const uint64_t         minfreespace,
-           vector<const string*> &paths)
+namespace ff
 {
-  const string *fallback;
-
-  fallback = NULL;
-  for(size_t i = 0, ei = basepaths.size(); i != ei; i++)
-    {
-      bool readonly;
-      uint64_t spaceavail;
-      uint64_t _spaceused;
-      const string *basepath = &basepaths[i];
-
-      if(!fs::info(*basepath,readonly,spaceavail,_spaceused))
-        continue;
-      if(readonly)
-        continue;
-      if(fallback == NULL)
-        fallback = basepath;
-      if(spaceavail < minfreespace)
-        continue;
-
-      paths.push_back(basepath);
-
-      return POLICY_SUCCESS;
-    }
-
-  if(fallback == NULL)
-    return POLICY_FAIL_ENOENT;
-
-  paths.push_back(fallback);
-
-  return POLICY_SUCCESS;
-}
-
-static
-int
-_ff_other(const vector<string>  &basepaths,
-          const char            *fusepath,
-          vector<const string*> &paths)
-{
-  string fullpath;
-
-  for(size_t i = 0, ei = basepaths.size(); i != ei; i++)
-    {
-      const string *basepath = &basepaths[i];
-
-      fs::path::make(basepath,fusepath,fullpath);
-
-      if(!fs::exists(fullpath))
-        continue;
-
-      paths.push_back(basepath);
-
-      return POLICY_SUCCESS;
-    }
-
-  return POLICY_FAIL_ENOENT;
-}
-
-namespace mergerfs
-{
+  static
   int
-  Policy::Func::ff(const Category::Enum::Type  type,
-                   const vector<string>       &basepaths,
-                   const char                 *fusepath,
-                   const uint64_t              minfreespace,
-                   vector<const string*>      &paths)
+  create(const Branches        &branches_,
+         const uint64_t         minfreespace,
+         vector<const string*> &paths)
   {
-    if(type == Category::Enum::create)
-      return _ff_create(basepaths,minfreespace,paths);
+    int rv;
+    int error;
+    fs::info_t info;
+    const Branch *branch;
 
-    return _ff_other(basepaths,fusepath,paths);
+    error = ENOENT;
+    for(size_t i = 0, ei = branches_.size(); i != ei; i++)
+      {
+        branch = &branches_[i];
+
+        if(branch->ro_or_nc())
+          error_and_continue(error,EROFS);
+        rv = fs::info(&branch->path,&info);
+        if(rv == -1)
+          error_and_continue(error,ENOENT);
+        if(info.readonly)
+          error_and_continue(error,EROFS);
+        if(info.spaceavail < minfreespace)
+          error_and_continue(error,ENOSPC);
+
+        paths.push_back(&branch->path);
+
+        return 0;
+      }
+
+    return (errno=error,-1);
   }
+}
+
+int
+Policy::Func::ff(const Category::Enum::Type  type,
+                 const Branches             &branches_,
+                 const char                 *fusepath,
+                 const uint64_t              minfreespace,
+                 vector<const string*>      &paths)
+{
+  if(type == Category::Enum::create)
+    return ff::create(branches_,minfreespace,paths);
+
+  return Policy::Func::epff(type,branches_,fusepath,minfreespace,paths);
 }

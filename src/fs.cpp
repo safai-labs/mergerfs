@@ -18,7 +18,6 @@
 #include <vector>
 
 #include <fcntl.h>
-#include <glob.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -27,106 +26,27 @@
 #include "fs_attr.hpp"
 #include "fs_base_realpath.hpp"
 #include "fs_base_stat.hpp"
-#include "fs_base_statvfs.hpp"
+#include "fs_exists.hpp"
 #include "fs_path.hpp"
+#include "fs_statvfs_cache.hpp"
 #include "fs_xattr.hpp"
-#include "statvfs_util.hpp"
 #include "str.hpp"
-#include "success_fail.hpp"
 
 using std::string;
 using std::vector;
 
 namespace fs
 {
-  bool
-  exists(const string &path,
-         struct stat  &st)
-  {
-    int rv;
-
-    rv = fs::lstat(path,st);
-
-    return LSTAT_SUCCEEDED(rv);
-  }
-
-  bool
-  exists(const string &path)
-  {
-    struct stat st;
-
-    return exists(path,st);
-  }
-
-  bool
-  info(const string &path,
-       bool         &readonly,
-       uint64_t     &spaceavail,
-       uint64_t     &spaceused)
-  {
-    int rv;
-    struct statvfs st;
-
-    rv = fs::statvfs(path,st);
-    if(STATVFS_SUCCEEDED(rv))
-      {
-        readonly   = StatVFS::readonly(st);
-        spaceavail = StatVFS::spaceavail(st);
-        spaceused  = StatVFS::spaceused(st);
-      }
-
-    return STATVFS_SUCCEEDED(rv);
-  }
-
-  bool
-  readonly(const string &path)
-  {
-    int rv;
-    struct statvfs st;
-
-    rv = fs::statvfs(path,st);
-
-    return (STATVFS_SUCCEEDED(rv) && StatVFS::readonly(st));
-  }
-
-  bool
-  spaceavail(const string &path,
-             uint64_t       &spaceavail)
-  {
-    int rv;
-    struct statvfs st;
-
-    rv = fs::statvfs(path,st);
-    if(STATVFS_SUCCEEDED(rv))
-      spaceavail = StatVFS::spaceavail(st);
-
-    return STATVFS_SUCCEEDED(rv);
-  }
-
-  bool
-  spaceused(const string &path,
-            uint64_t     &spaceused)
-  {
-    int rv;
-    struct statvfs st;
-
-    rv = fs::statvfs(path,st);
-    if(STATVFS_SUCCEEDED(rv))
-      spaceused = StatVFS::spaceused(st);
-
-    return STATVFS_SUCCEEDED(rv);
-  }
-
   void
-  findallfiles(const vector<string> &srcmounts,
+  findallfiles(const vector<string> &basepaths,
                const char           *fusepath,
                vector<string>       &paths)
   {
     string fullpath;
 
-    for(size_t i = 0, ei = srcmounts.size(); i != ei; i++)
+    for(size_t i = 0, ei = basepaths.size(); i != ei; i++)
       {
-        fs::path::make(&srcmounts[i],fusepath,fullpath);
+        fullpath = fs::path::make(basepaths[i],fusepath);
 
         if(!fs::exists(fullpath))
           continue;
@@ -136,7 +56,7 @@ namespace fs
   }
 
   int
-  findonfs(const vector<string> &srcmounts,
+  findonfs(const vector<string> &basepaths,
            const string         &fusepath,
            const int             fd,
            string               &basepath)
@@ -146,53 +66,28 @@ namespace fs
     string fullpath;
     struct stat st;
 
-    rv = fs::fstat(fd,st);
-    if(FSTAT_FAILED(rv))
+    rv = fs::fstat(fd,&st);
+    if(rv == -1)
       return -1;
 
     dev = st.st_dev;
-    for(size_t i = 0, ei = srcmounts.size(); i != ei; i++)
+    for(size_t i = 0, ei = basepaths.size(); i != ei; i++)
       {
-        fs::path::make(&srcmounts[i],fusepath,fullpath);
+        fullpath = fs::path::make(basepaths[i],fusepath);
 
-        rv = fs::lstat(fullpath,st);
-        if(FSTAT_FAILED(rv))
+        rv = fs::lstat(fullpath,&st);
+        if(rv == -1)
           continue;
 
         if(st.st_dev != dev)
           continue;
 
-        basepath = srcmounts[i];
+        basepath = basepaths[i];
 
         return 0;
       }
 
     return (errno=ENOENT,-1);
-  }
-
-  void
-  glob(const vector<string> &patterns,
-       vector<string>       &strs)
-  {
-    int flags;
-    size_t veclen;
-    glob_t gbuf = {0};
-
-    veclen = patterns.size();
-    if(veclen == 0)
-      return;
-
-    flags = 0;
-    glob(patterns[0].c_str(),flags,NULL,&gbuf);
-
-    flags = GLOB_APPEND;
-    for(size_t i = 1; i < veclen; i++)
-      glob(patterns[i].c_str(),flags,NULL,&gbuf);
-
-    for(size_t i = 0; i < gbuf.gl_pathc; ++i)
-      strs.push_back(gbuf.gl_pathv[i]);
-
-    globfree(&gbuf);
   }
 
   void
@@ -230,19 +125,18 @@ namespace fs
       const uint64_t        minfreespace,
       string               &path)
   {
+    int rv;
     uint64_t mfs;
+    uint64_t spaceavail;
     const string *mfsbasepath;
 
     mfs = 0;
     mfsbasepath = NULL;
     for(size_t i = 0, ei = basepaths.size(); i != ei; i++)
       {
-        uint64_t spaceavail;
-        const string &basepath = basepaths[i];
-
-        if(!fs::spaceavail(basepath,spaceavail))
+        rv = fs::statvfs_cache_spaceavail(basepaths[i],&spaceavail);
+        if(rv == -1)
           continue;
-
         if(spaceavail < minfreespace)
           continue;
         if(spaceavail <= mfs)

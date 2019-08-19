@@ -33,6 +33,9 @@
 #error Please add -D_FILE_OFFSET_BITS=64 to your compile flags!
 #endif
 
+#define FUSE_DEFAULT_MAX_PAGES_PER_REQ 32
+#define FUSE_MAX_MAX_PAGES 256
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -42,49 +45,53 @@ extern "C" {
  *
  * Changed in version 2.5
  */
-struct fuse_file_info {
-	/** Open flags.	 Available in open() and release() */
-	int flags;
+struct
+fuse_file_info
+{
+  /** Open flags. Available in open() and release() */
+  int flags;
 
-	/** Old file handle, don't use */
-	unsigned long fh_old;
+  /** In case of a write operation indicates if this was caused by a
+      writepage */
+  uint32_t writepage : 1;
 
-	/** In case of a write operation indicates if this was caused by a
-	    writepage */
-	int writepage;
+  /** Can be filled in by open, to use direct I/O on this file.
+      Introduced in version 2.4 */
+  uint32_t direct_io : 1;
 
-	/** Can be filled in by open, to use direct I/O on this file.
-	    Introduced in version 2.4 */
-	unsigned int direct_io : 1;
+  /** Can be filled in by open, to indicate, that cached file data
+      need not be invalidated.  Introduced in version 2.4 */
+  uint32_t keep_cache : 1;
 
-	/** Can be filled in by open, to indicate, that cached file data
-	    need not be invalidated.  Introduced in version 2.4 */
-	unsigned int keep_cache : 1;
+  /** Indicates a flush operation.  Set in flush operation, also
+      maybe set in highlevel lock operation and lowlevel release
+      operation.	Introduced in version 2.6 */
+  uint32_t flush : 1;
 
-	/** Indicates a flush operation.  Set in flush operation, also
-	    maybe set in highlevel lock operation and lowlevel release
-	    operation.	Introduced in version 2.6 */
-	unsigned int flush : 1;
+  /** Can be filled in by open, to indicate that the file is not
+      seekable.  Introduced in version 2.8 */
+  uint32_t nonseekable : 1;
 
-	/** Can be filled in by open, to indicate that the file is not
-	    seekable.  Introduced in version 2.8 */
-	unsigned int nonseekable : 1;
+  /* Indicates that flock locks for this file should be
+     released.  If set, lock_owner shall contain a valid value.
+     May only be set in ->release().  Introduced in version
+     2.9 */
+  uint32_t flock_release : 1;
 
-	/* Indicates that flock locks for this file should be
-	   released.  If set, lock_owner shall contain a valid value.
-	   May only be set in ->release().  Introduced in version
-	   2.9 */
-	unsigned int flock_release : 1;
+  /* Requests the kernel to cache entries returned by readdir */
+  uint32_t cache_readdir : 1;
 
-	/** Padding.  Do not use*/
-	unsigned int padding : 27;
+  uint32_t auto_cache : 1;
 
-	/** File handle.  May be filled in by filesystem in open().
-	    Available in all other file operations */
-	uint64_t fh;
+  /** Padding.  Do not use*/
+  uint32_t padding : 24;
 
-	/** Lock owner id.  Available in locking operations and flush */
-	uint64_t lock_owner;
+  /** File handle.  May be filled in by filesystem in open().
+      Available in all other file operations */
+  uint64_t fh;
+
+  /** Lock owner id.  Available in locking operations and flush */
+  uint64_t lock_owner;
 };
 
 /**
@@ -100,18 +107,25 @@ struct fuse_file_info {
  * FUSE_CAP_SPLICE_MOVE: ability to move data to the fuse device with splice()
  * FUSE_CAP_SPLICE_READ: ability to use splice() to read from the fuse device
  * FUSE_CAP_IOCTL_DIR: ioctl support on directories
+ * FUSE_CAP_CACHE_SYMLINKS: cache READLINK responses
  */
-#define FUSE_CAP_ASYNC_READ	(1 << 0)
-#define FUSE_CAP_POSIX_LOCKS	(1 << 1)
-#define FUSE_CAP_ATOMIC_O_TRUNC	(1 << 3)
-#define FUSE_CAP_EXPORT_SUPPORT	(1 << 4)
-#define FUSE_CAP_BIG_WRITES	(1 << 5)
-#define FUSE_CAP_DONT_MASK	(1 << 6)
-#define FUSE_CAP_SPLICE_WRITE	(1 << 7)
-#define FUSE_CAP_SPLICE_MOVE	(1 << 8)
-#define FUSE_CAP_SPLICE_READ	(1 << 9)
-#define FUSE_CAP_FLOCK_LOCKS	(1 << 10)
-#define FUSE_CAP_IOCTL_DIR	(1 << 11)
+#define FUSE_CAP_ASYNC_READ      (1 << 0)
+#define FUSE_CAP_POSIX_LOCKS     (1 << 1)
+#define FUSE_CAP_ATOMIC_O_TRUNC  (1 << 3)
+#define FUSE_CAP_EXPORT_SUPPORT  (1 << 4)
+#define FUSE_CAP_BIG_WRITES      (1 << 5)
+#define FUSE_CAP_DONT_MASK       (1 << 6)
+#define FUSE_CAP_SPLICE_WRITE    (1 << 7)
+#define FUSE_CAP_SPLICE_MOVE     (1 << 8)
+#define FUSE_CAP_SPLICE_READ     (1 << 9)
+#define FUSE_CAP_FLOCK_LOCKS     (1 << 10)
+#define FUSE_CAP_IOCTL_DIR       (1 << 11)
+#define FUSE_CAP_ASYNC_DIO       (1 << 15)
+#define FUSE_CAP_PARALLEL_DIROPS (1 << 18)
+#define FUSE_CAP_POSIX_ACL       (1 << 19)
+#define FUSE_CAP_CACHE_SYMLINKS  (1 << 20)
+#define FUSE_CAP_MAX_PAGES       (1 << 21)
+
 
 /**
  * Ioctl flags
@@ -149,11 +163,6 @@ struct fuse_conn_info {
 	unsigned proto_minor;
 
 	/**
-	 * Is asynchronous read supported (read-write)
-	 */
-	unsigned async_read;
-
-	/**
 	 * Maximum size of the write buffer
 	 */
 	unsigned max_write;
@@ -183,10 +192,15 @@ struct fuse_conn_info {
 	 */
 	unsigned congestion_threshold;
 
+        /**
+         * Max pages
+         */
+        uint16_t max_pages;
+
 	/**
 	 * For future use.
 	 */
-	unsigned reserved[23];
+	unsigned reserved[22];
 };
 
 struct fuse_session;
@@ -203,7 +217,8 @@ struct fuse_pollhandle;
  * @param args argument vector
  * @return the communication channel on success, NULL on failure
  */
-struct fuse_chan *fuse_mount(const char *mountpoint, struct fuse_args *args);
+struct fuse_chan *fuse_mount(const char       *mountpoint,
+                             struct fuse_args *args);
 
 /**
  * Umount a FUSE mountpoint

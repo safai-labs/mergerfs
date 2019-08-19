@@ -123,8 +123,17 @@ struct fuse_operations {
 	 * */
 	int (*mkdir) (const char *, mode_t);
 
+       /** Hide files unlinked / renamed over
+        *
+        * Allows storing of a file handle when a file is unlinked
+        * while open. Helps manage the fact the kernel usually does
+        * not send fh with getattr requests.
+        */
+        int (*prepare_hide)(const char *name_, uint64_t *fh_);
+        int (*free_hide)(const uint64_t fh_);
+
 	/** Remove a file */
-	int (*unlink) (const char *);
+        int (*unlink) (const char *);
 
 	/** Remove a directory */
 	int (*rmdir) (const char *);
@@ -140,9 +149,11 @@ struct fuse_operations {
 
 	/** Change the permission bits of a file */
 	int (*chmod) (const char *, mode_t);
+        int (*fchmod)(const struct fuse_file_info *, const mode_t);
 
 	/** Change the owner and group of a file */
 	int (*chown) (const char *, uid_t, gid_t);
+        int (*fchown)(const struct fuse_file_info *, const uid_t, const gid_t);
 
 	/** Change the size of a file */
 	int (*truncate) (const char *, off_t);
@@ -441,7 +452,8 @@ struct fuse_operations {
 	 *
 	 * Introduced in version 2.6
 	 */
-	int (*utimens) (const char *, const struct timespec tv[2]);
+	int (*utimens)(const char *, const struct timespec tv[2]);
+        int (*futimens)(const struct fuse_file_info *ffi_, const struct timespec tv_[2]);
 
 	/**
 	 * Map block index within file to block index within device
@@ -505,8 +517,13 @@ struct fuse_operations {
 	 *
 	 * Introduced in version 2.8
 	 */
-	int (*ioctl) (const char *, int cmd, void *arg,
-		      struct fuse_file_info *, unsigned int flags, void *data);
+	int (*ioctl) (const char *fusepath,
+                      int cmd,
+                      void *arg,
+		      struct fuse_file_info *ffi,
+                      unsigned int flags,
+                      void *data,
+                      uint32_t *out_bufsz);
 
 	/**
 	 * Poll for IO readiness events
@@ -591,6 +608,30 @@ struct fuse_operations {
 	 */
 	int (*fallocate) (const char *, int, off_t, off_t,
 			  struct fuse_file_info *);
+
+  /**
+   * Copy a range of data from one file to another
+   *
+   * Performs an optimized copy between two file descriptors without
+   * the
+   * additional cost of transferring data through the FUSE kernel
+   * module
+   * to user space (glibc) and then back into the FUSE filesystem
+   * again.
+   *
+   * In case this method is not implemented, glibc falls back to
+   * reading
+   * data from the source and writing to the destination. Effectively
+   * doing an inefficient copy of the data.
+   */
+  ssize_t (*copy_file_range)(const char            *path_in,
+                             struct fuse_file_info *fi_in,
+                             off_t                  offset_in,
+                             const char            *path_out,
+                             struct fuse_file_info *fi_out,
+                             off_t                  offset_out,
+                             size_t                 size,
+                             int                    flags);
 };
 
 /** Extra context that may be needed by some filesystems
@@ -696,7 +737,17 @@ int fuse_loop(struct fuse *f);
  */
 void fuse_exit(struct fuse *f);
 
-int fuse_config_num_threads(const struct fuse *f);
+void fuse_config_set_entry_timeout(struct fuse  *fuse_,
+                                   const double  entry_timeout_);
+void fuse_config_set_negative_entry_timeout(struct fuse  *fuse_,
+                                            const double  entry_timeout_);
+void fuse_config_set_attr_timeout(struct fuse  *fuse_,
+                                  const double  attr_timeout_);
+
+int    fuse_config_num_threads(const struct fuse *fuse_);
+double fuse_config_get_entry_timeout(const struct fuse *fuse_);
+double fuse_config_get_negative_entry_timeout(const struct fuse *fuse_);
+double fuse_config_get_attr_timeout(const struct fuse *fuse_);
 
 /**
  * FUSE event loop with multiple threads
@@ -884,7 +935,8 @@ int fuse_fs_removexattr(struct fuse_fs *fs, const char *path,
 int fuse_fs_bmap(struct fuse_fs *fs, const char *path, size_t blocksize,
 		 uint64_t *idx);
 int fuse_fs_ioctl(struct fuse_fs *fs, const char *path, int cmd, void *arg,
-		  struct fuse_file_info *fi, unsigned int flags, void *data);
+		  struct fuse_file_info *fi, unsigned int flags,
+                  void *data, uint32_t *out_bufsz);
 int fuse_fs_poll(struct fuse_fs *fs, const char *path,
 		 struct fuse_file_info *fi, struct fuse_pollhandle *ph,
 		 unsigned *reventsp);
@@ -892,6 +944,15 @@ int fuse_fs_fallocate(struct fuse_fs *fs, const char *path, int mode,
 		 off_t offset, off_t length, struct fuse_file_info *fi);
 void fuse_fs_init(struct fuse_fs *fs, struct fuse_conn_info *conn);
 void fuse_fs_destroy(struct fuse_fs *fs);
+
+int fuse_fs_prepare_hide(struct fuse_fs *fs, const char *path, uint64_t *fh);
+int fuse_fs_free_hide(struct fuse_fs *fs, uint64_t fh);
+ssize_t fuse_fs_copy_file_range(struct fuse_fs *fs,
+                                const char *path_in,
+                                struct fuse_file_info *fi_in, off_t off_in,
+                                const char *path_out,
+                                struct fuse_file_info *fi_out, off_t off_out,
+                                size_t len, int flags);
 
 int fuse_notify_poll(struct fuse_pollhandle *ph);
 

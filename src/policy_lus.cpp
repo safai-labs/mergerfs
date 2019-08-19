@@ -14,126 +14,77 @@
   OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 */
 
+#include "errno.hpp"
+#include "fs.hpp"
+#include "fs_exists.hpp"
+#include "fs_info.hpp"
+#include "fs_path.hpp"
+#include "policy.hpp"
+#include "policy_error.hpp"
+
 #include <limits>
 #include <string>
 #include <vector>
 
-#include "errno.hpp"
-#include "fs.hpp"
-#include "fs_path.hpp"
-#include "policy.hpp"
-
 using std::string;
 using std::vector;
-using mergerfs::Category;
 
-static
-int
-_lus_create(const vector<string>  &basepaths,
-            const uint64_t         minfreespace,
-            vector<const string*> &paths)
+namespace lus
 {
-  string fullpath;
-  uint64_t lus;
-  const string *lusbasepath;
-
-  lus = std::numeric_limits<uint64_t>::max();
-  lusbasepath = NULL;
-  for(size_t i = 0, ei = basepaths.size(); i != ei; i++)
-    {
-      bool readonly;
-      uint64_t spaceused;
-      uint64_t spaceavail;
-      const string *basepath = &basepaths[i];
-
-      if(!fs::info(*basepath,readonly,spaceavail,spaceused))
-        continue;
-      if(readonly)
-        continue;
-      if(spaceavail < minfreespace)
-        continue;
-      if(spaceused >= lus)
-        continue;
-
-      lus = spaceused;
-      lusbasepath = basepath;
-    }
-
-  if(lusbasepath == NULL)
-    return POLICY_FAIL_ENOENT;
-
-  paths.push_back(lusbasepath);
-
-  return POLICY_SUCCESS;
-}
-
-static
-int
-_lus_other(const vector<string>  &basepaths,
-           const char            *fusepath,
-           vector<const string*> &paths)
-{
-  string fullpath;
-  uint64_t lus;
-  const string *lusbasepath;
-
-  lus = 0;
-  lusbasepath = NULL;
-  for(size_t i = 0, ei = basepaths.size(); i != ei; i++)
-    {
-      uint64_t spaceused;
-      const string *basepath = &basepaths[i];
-
-      fs::path::make(basepath,fusepath,fullpath);
-
-      if(!fs::exists(fullpath))
-        continue;
-      if(!fs::spaceused(*basepath,spaceused))
-        continue;
-      if(spaceused >= lus)
-        continue;
-
-      lus = spaceused;
-      lusbasepath = basepath;
-    }
-
-  if(lusbasepath == NULL)
-    return POLICY_FAIL_ENOENT;
-
-  paths.push_back(lusbasepath);
-
-  return POLICY_SUCCESS;
-}
-
-static
-int
-_lus(const Category::Enum::Type  type,
-     const vector<string>       &basepaths,
-     const char                 *fusepath,
-     const uint64_t              minfreespace,
-     vector<const string*>      &paths)
-{
-  if(type == Category::Enum::create)
-    return _lus_create(basepaths,minfreespace,paths);
-
-  return _lus_other(basepaths,fusepath,paths);
-}
-
-namespace mergerfs
-{
+  static
   int
-  Policy::Func::lus(const Category::Enum::Type  type,
-                    const vector<string>       &basepaths,
-                    const char                 *fusepath,
-                    const uint64_t              minfreespace,
-                    vector<const string*>      &paths)
+  create(const Branches        &branches_,
+         const uint64_t         minfreespace,
+         vector<const string*> &paths)
   {
     int rv;
+    int error;
+    uint64_t lus;
+    fs::info_t info;
+    const Branch *branch;
+    const string *lusbasepath;
 
-    rv = _lus(type,basepaths,fusepath,minfreespace,paths);
-    if(POLICY_FAILED(rv))
-      rv = Policy::Func::mfs(type,basepaths,fusepath,minfreespace,paths);
+    error = ENOENT;
+    lus = std::numeric_limits<uint64_t>::max();
+    lusbasepath = NULL;
+    for(size_t i = 0, ei = branches_.size(); i != ei; i++)
+      {
+        branch = &branches_[i];
 
-    return rv;
+        if(branch->ro_or_nc())
+          error_and_continue(error,EROFS);
+        rv = fs::info(&branch->path,&info);
+        if(rv == -1)
+          error_and_continue(error,ENOENT);
+        if(info.readonly)
+          error_and_continue(error,EROFS);
+        if(info.spaceavail < minfreespace)
+          error_and_continue(error,ENOSPC);
+        if(info.spaceused >= lus)
+          continue;
+
+        lus = info.spaceused;
+        lusbasepath = &branch->path;
+      }
+
+    if(lusbasepath == NULL)
+      return (errno=error,-1);
+
+    paths.push_back(lusbasepath);
+
+    return 0;
   }
+}
+
+int
+Policy::Func::lus(const Category::Enum::Type  type,
+                  const Branches             &branches_,
+                  const char                 *fusepath,
+                  const uint64_t              minfreespace,
+                  vector<const string*>      &paths)
+{
+  if(type == Category::Enum::create)
+    return lus::create(branches_,minfreespace,paths);
+
+  return Policy::Func::eplus(type,branches_,fusepath,minfreespace,paths);
 }

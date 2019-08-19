@@ -25,10 +25,29 @@ namespace fs
   static
   inline
   int
-  ioctl(const int            fd,
-        const unsigned long  request,
-        void                *data)
+  ioctl(const int           fd_,
+        const unsigned long request_)
   {
-    return ::ioctl(fd,request,data);
+    return ::ioctl(fd_,request_);
+  }
+
+  static
+  inline
+  int
+  ioctl(const int            fd_,
+        const unsigned long  request_,
+        void                *data_)
+  {
+    return ::ioctl(fd_,request_,data_);
+  }
+
+  static
+  inline
+  int
+  ioctl(const int           fd_,
+        const unsigned long request_,
+        const int           int_)
+  {
+    return ::ioctl(fd_,request_,int_);
   }
 }

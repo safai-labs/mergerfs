@@ -27,8 +27,16 @@ namespace fs
   static
   inline
   int
-  unlink(const std::string &path)
+  unlink(const char *path_)
   {
-    return ::unlink(path.c_str());
+    return ::unlink(path_);
+  }
+
+  static
+  inline
+  int
+  unlink(const std::string &path_)
+  {
+    return fs::unlink(path_.c_str());
   }
 }

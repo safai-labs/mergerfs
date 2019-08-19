@@ -14,24 +14,21 @@
   OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 */
 
-#include <string>
-#include <vector>
-
 #include "errno.hpp"
 #include "policy.hpp"
+
+#include <string>
+#include <vector>
 
 using std::string;
 using std::vector;
 
-namespace mergerfs
+int
+Policy::Func::invalid(const Category::Enum::Type  type,
+                      const Branches             &branches_,
+                      const char                 *fusepath,
+                      const uint64_t              minfreespace,
+                      vector<const string*>      &paths)
 {
-  int
-  Policy::Func::invalid(const Category::Enum::Type  type,
-                        const vector<string>       &basepaths,
-                        const char                 *fusepath,
-                        const uint64_t              minfreespace,
-                        vector<const string*>      &paths)
-  {
-    return POLICY_FAIL_ERRNO(EINVAL);
-  }
+  return (errno=EINVAL,-1);
 }

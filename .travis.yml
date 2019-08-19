@@ -18,14 +18,17 @@ matrix:
       dist: trusty
       compiler: clang
       sudo: required
-    - os: osx
+    - os: linux
+      dist: xenial
+      compiler: gcc
+      sudo: required
+    - os: linux
+      dist: xenial
       compiler: clang
-
-before_script:
-  - if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then brew update; fi
-  - if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then brew tap caskroom/cask; fi
-  - if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then brew cask install osxfuse; fi
+      sudo: required
 
 script:
+  - sudo -E apt-get install fakeroot
   - sudo -E make install-build-pkgs
   - make
+  - make deb

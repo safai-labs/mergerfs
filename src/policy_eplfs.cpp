@@ -14,131 +14,169 @@
   OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 */
 
+#include "errno.hpp"
+#include "fs.hpp"
+#include "fs_exists.hpp"
+#include "fs_info.hpp"
+#include "fs_path.hpp"
+#include "fs_statvfs_cache.hpp"
+#include "policy.hpp"
+#include "policy_error.hpp"
+
 #include <limits>
 #include <string>
 #include <vector>
 
-#include "errno.hpp"
-#include "fs.hpp"
-#include "fs_path.hpp"
-#include "policy.hpp"
-
 using std::string;
 using std::vector;
-using mergerfs::Category;
 
-static
-int
-_eplfs_create(const vector<string>  &basepaths,
-              const char            *fusepath,
-              const uint64_t         minfreespace,
-              vector<const string*> &paths)
+namespace eplfs
 {
-  string fullpath;
-  uint64_t eplfs;
-  const string *eplfsbasepath;
-
-  eplfs = std::numeric_limits<uint64_t>::max();
-  eplfsbasepath = NULL;
-  for(size_t i = 0, ei = basepaths.size(); i != ei; i++)
-    {
-      bool readonly;
-      uint64_t spaceavail;
-      uint64_t _spaceused;
-      const string *basepath = &basepaths[i];
-
-      fs::path::make(basepath,fusepath,fullpath);
-
-      if(!fs::exists(fullpath))
-        continue;
-      if(!fs::info(*basepath,readonly,spaceavail,_spaceused))
-        continue;
-      if(readonly)
-        continue;
-      if(spaceavail < minfreespace)
-        continue;
-      if(spaceavail > eplfs)
-        continue;
-
-      eplfs = spaceavail;
-      eplfsbasepath = basepath;
-    }
-
-  if(eplfsbasepath == NULL)
-    return POLICY_FAIL_ENOENT;
-
-  paths.push_back(eplfsbasepath);
-
-  return POLICY_SUCCESS;
-}
-
-static
-int
-_eplfs_other(const vector<string>  &basepaths,
-             const char            *fusepath,
-             vector<const string*> &paths)
-{
-  string fullpath;
-  uint64_t eplfs;
-  const string *eplfsbasepath;
-
-  eplfs = std::numeric_limits<uint64_t>::max();
-  eplfsbasepath = NULL;
-  for(size_t i = 0, ei = basepaths.size(); i != ei; i++)
-    {
-      uint64_t spaceavail;
-      const string *basepath = &basepaths[i];
-
-      fs::path::make(basepath,fusepath,fullpath);
-
-      if(!fs::exists(fullpath))
-        continue;
-      if(!fs::spaceavail(*basepath,spaceavail))
-        continue;
-      if(spaceavail > eplfs)
-        continue;
-
-      eplfs = spaceavail;
-      eplfsbasepath = basepath;
-    }
-
-  if(eplfsbasepath == NULL)
-    return POLICY_FAIL_ENOENT;
-
-  paths.push_back(eplfsbasepath);
-
-  return POLICY_SUCCESS;
-}
-
-static
-int
-_eplfs(const Category::Enum::Type type,
-       const vector<string>       &basepaths,
-       const char                 *fusepath,
-       const uint64_t              minfreespace,
-       vector<const string*>      &paths)
-{
-  if(type == Category::Enum::create)
-    return _eplfs_create(basepaths,fusepath,minfreespace,paths);
-
-  return _eplfs_other(basepaths,fusepath,paths);
-}
-
-namespace mergerfs
-{
+  static
   int
-  Policy::Func::eplfs(const Category::Enum::Type  type,
-                      const vector<string>       &basepaths,
-                      const char                 *fusepath,
-                      const uint64_t              minfreespace,
-                      vector<const string*>      &paths)
+  create(const Branches        &branches_,
+         const char            *fusepath,
+         const uint64_t         minfreespace,
+         vector<const string*> &paths)
   {
     int rv;
+    int error;
+    uint64_t eplfs;
+    fs::info_t info;
+    const Branch *branch;
+    const string *eplfsbasepath;
 
-    rv = _eplfs(type,basepaths,fusepath,minfreespace,paths);
-    if(POLICY_FAILED(rv))
-      rv = Policy::Func::lfs(type,basepaths,fusepath,minfreespace,paths);
+    error = ENOENT;
+    eplfs = std::numeric_limits<uint64_t>::max();
+    eplfsbasepath = NULL;
+    for(size_t i = 0, ei = branches_.size(); i != ei; i++)
+      {
+        branch = &branches_[i];
 
-    return rv;
+        if(!fs::exists(branch->path,fusepath))
+          error_and_continue(error,ENOENT);
+        if(branch->ro_or_nc())
+          error_and_continue(error,EROFS);
+        rv = fs::info(&branch->path,&info);
+        if(rv == -1)
+          error_and_continue(error,ENOENT);
+        if(info.readonly)
+          error_and_continue(error,EROFS);
+        if(info.spaceavail < minfreespace)
+          error_and_continue(error,ENOSPC);
+        if(info.spaceavail > eplfs)
+          continue;
+
+        eplfs = info.spaceavail;
+        eplfsbasepath = &branch->path;
+      }
+
+    if(eplfsbasepath == NULL)
+      return (errno=error,-1);
+
+    paths.push_back(eplfsbasepath);
+
+    return 0;
   }
+
+  static
+  int
+  action(const Branches        &branches_,
+         const char            *fusepath,
+         vector<const string*> &paths)
+  {
+    int rv;
+    int error;
+    uint64_t eplfs;
+    fs::info_t info;
+    const Branch *branch;
+    const string *eplfsbasepath;
+
+    error = ENOENT;
+    eplfs = std::numeric_limits<uint64_t>::max();
+    eplfsbasepath = NULL;
+    for(size_t i = 0, ei = branches_.size(); i != ei; i++)
+      {
+        branch = &branches_[i];
+
+        if(!fs::exists(branch->path,fusepath))
+          error_and_continue(error,ENOENT);
+        if(branch->ro())
+          error_and_continue(error,EROFS);
+        rv = fs::info(&branch->path,&info);
+        if(rv == -1)
+          error_and_continue(error,ENOENT);
+        if(info.readonly)
+          error_and_continue(error,EROFS);
+        if(info.spaceavail > eplfs)
+          continue;
+
+        eplfs = info.spaceavail;
+        eplfsbasepath = &branch->path;
+      }
+
+    if(eplfsbasepath == NULL)
+      return (errno=error,-1);
+
+    paths.push_back(eplfsbasepath);
+
+    return 0;
+  }
+
+  static
+  int
+  search(const Branches        &branches_,
+         const char            *fusepath,
+         vector<const string*> &paths)
+  {
+    int rv;
+    uint64_t eplfs;
+    uint64_t spaceavail;
+    const Branch *branch;
+    const string *eplfsbasepath;
+
+    eplfs = std::numeric_limits<uint64_t>::max();
+    eplfsbasepath = NULL;
+    for(size_t i = 0, ei = branches_.size(); i != ei; i++)
+      {
+        branch = &branches_[i];
+
+        if(!fs::exists(branch->path,fusepath))
+          continue;
+        rv = fs::statvfs_cache_spaceavail(branch->path,&spaceavail);
+        if(rv == -1)
+          continue;
+        if(spaceavail > eplfs)
+          continue;
+
+        eplfs = spaceavail;
+        eplfsbasepath = &branch->path;
+      }
+
+    if(eplfsbasepath == NULL)
+      return (errno=ENOENT,-1);
+
+    paths.push_back(eplfsbasepath);
+
+    return 0;
+  }
+}
+
+int
+Policy::Func::eplfs(const Category::Enum::Type  type,
+                    const Branches             &branches_,
+                    const char                 *fusepath,
+                    const uint64_t              minfreespace,
+                    vector<const string*>      &paths)
+{
+  switch(type)
+    {
+    case Category::Enum::create:
+      return eplfs::create(branches_,fusepath,minfreespace,paths);
+    case Category::Enum::action:
+      return eplfs::action(branches_,fusepath,paths);
+    case Category::Enum::search:
+    default:
+      return eplfs::search(branches_,fusepath,paths);
+    }
 }
